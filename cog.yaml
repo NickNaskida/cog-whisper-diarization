@@ -7,13 +7,14 @@ build:
 
   # a list of ubuntu apt packages to install
   system_packages:
+    - "git"
     - "ffmpeg"
     - "libmagic1"
     # - "libgl1-mesa-glx"
     # - "libglib2.0-0"
 
   # python version in the form '3.8' or '3.8.12'
-  python_version: "3.10"
+  python_version: "3.11"
 
   python_requirements: requirements.txt
 

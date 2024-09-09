@@ -1,5 +1,4 @@
 # Prediction interface for Cog ⚙️
-from typing import Any, List
 import base64
 import datetime
 import subprocess
@@ -10,7 +9,7 @@ import torch
 import re
 
 from cog import BasePredictor, BaseModel, Input, File, Path
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 from pyannote.audio import Pipeline
 import torchaudio
 
@@ -26,11 +25,12 @@ class Predictor(BasePredictor):
     def setup(self):
         """Load the model into memory to make running multiple predictions efficient"""
         model_name = "large-v3"
-        self.model = WhisperModel(
+        model = WhisperModel(
             model_name,
             device="cuda" if torch.cuda.is_available() else "cpu",
             compute_type="float16",
         )
+        self.model = BatchedInferencePipeline(model=model)
         self.diarization_model = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
             use_auth_token="YOUR HF TOKEN",
@@ -72,6 +72,11 @@ class Predictor(BasePredictor):
             description="Vocabulary: provide names, acronyms and loanwords in a list. Use punctuation for best accuracy.",
             default=None,
         ),
+        batch_size: int = Input(
+            description="Batch size for inference. (Reduce if face OOM error)",
+            default=64,
+            ge=1
+        ),
         # word_timestamps: bool = Input(description="Return word timestamps", default=True), needs to be implemented
         offset_seconds: int = Input(
             description="Offset in seconds, used for chunked inputs", default=0, ge=0
@@ -82,10 +87,10 @@ class Predictor(BasePredictor):
         """ if sum([file_string is not None, file_url is not None, file is not None]) != 1:
             raise RuntimeError("Provide either file_string, file or file_url") """
 
-        try:
-            # Generate a temporary filename
-            temp_wav_filename = f"temp-{time.time_ns()}.wav"
+        # Generate a temporary filename
+        temp_wav_filename = f"temp-{time.time_ns()}.wav"
 
+        try:
             if file is not None:
                 subprocess.run(
                     [
@@ -161,6 +166,7 @@ class Predictor(BasePredictor):
                 word_timestamps=True,
                 transcript_output_format=transcript_output_format,
                 translate=translate,
+                batch_size=batch_size,
             )
 
             print(f"done with inference")
@@ -193,6 +199,7 @@ class Predictor(BasePredictor):
         word_timestamps=True,
         transcript_output_format="both",
         translate=False,
+        batch_size: int = 64,
     ):
         time_start = time.time()
 
@@ -205,7 +212,8 @@ class Predictor(BasePredictor):
             word_timestamps=word_timestamps,
             language=language,
             task="translate" if translate else "transcribe",
-            hotwords=prompt
+            hotwords=prompt,
+            batch_size=batch_size,
         )
         segments, transcript_info = self.model.transcribe(audio_file_wav, **options)
         segments = list(segments)

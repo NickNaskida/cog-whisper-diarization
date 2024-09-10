@@ -160,6 +160,7 @@ class Predictor(BasePredictor):
                 ).to(torch.device("cuda"))
             except Exception as e:
                 print(f"https://huggingface.co/pyannote/speaker-diarization-3.1 cannot be loaded, please check the hf_token provided.: {e}")
+                raise
 
             segments, detected_num_speakers, detected_language = self.speech_to_text(
                 temp_wav_filename,
@@ -320,7 +321,7 @@ class Predictor(BasePredictor):
                         if current_speaker != speaker:
                             if not speaker_changes or (word_start - speaker_changes[-1][0]) >= min_speaker_duration:
                                 current_speaker = speaker
-                                speaker_changes.append((round(word_start - offset_seconds, 2), speaker))
+                                speaker_changes.append((word_start, speaker))
 
                         segment_text.append(word["word"])
                         word["word"] = word["word"].strip()
@@ -349,31 +350,28 @@ class Predictor(BasePredictor):
                 # Merge speaker changes that occur mid-sentence
                 merged_speaker_changes = []
                 for i, (start, speaker) in enumerate(speaker_changes):
-                    if i == 0 or (
-                            merged_speaker_changes and start - merged_speaker_changes[-1][0] >= min_speaker_duration
-                    ):
+                    if i == 0 or (merged_speaker_changes and start - merged_speaker_changes[-1][0] >= min_speaker_duration):
                         # Check if this change is near a sentence boundary
-                        word_index = next((i for i, w in enumerate(segment_words) if w["start"] >= start),
-                                          len(segment_words) - 1)
+                        word_index = next(
+                            (i for i, w in enumerate(segment_words) if w["start"] >= start - offset_seconds),
+                            len(segment_words) - 1)
                         char_index = sum(len(w["word"]) + 1 for w in segment_words[:word_index])
                         if any(abs(char_index - boundary) < 10 for boundary in sentence_boundaries):
                             merged_speaker_changes.append((start, speaker))
 
                 # Split the segment if there are significant speaker changes
                 if len(merged_speaker_changes) > 1:
-                    for i in range(len(merged_speaker_changes)):
-                        start = merged_speaker_changes[i][0]
-                        end = merged_speaker_changes[i + 1][0] if i + 1 < len(merged_speaker_changes) else round(
-                            segment_end - offset_seconds, 2)
-                        speaker = merged_speaker_changes[i][1]
+                    for i, (start, speaker) in enumerate(merged_speaker_changes):
+                        end = merged_speaker_changes[i + 1][0] if i + 1 < len(merged_speaker_changes) else segment_end
 
-                        sub_segment_words = [w for w in segment_words if start <= w["start"] < end]
+                        sub_segment_words = [w for w in segment_words if
+                                             start - offset_seconds <= w["start"] < end - offset_seconds]
                         sub_segment_text = " ".join([w["word"] for w in sub_segment_words])
 
                         new_segment = {
                             "avg_logprob": segment["avg_logprob"],
-                            "start": start,
-                            "end": end,
+                            "start": round(start - offset_seconds, 2),
+                            "end": round(end - offset_seconds, 2),
                             "speaker": speaker,
                             "text": sub_segment_text,
                             "words": sub_segment_words,

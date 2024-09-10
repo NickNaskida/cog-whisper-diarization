@@ -3,15 +3,16 @@ import base64
 import datetime
 import subprocess
 import os
+
 import requests
 import time
 import torch
 import re
 
-from cog import BasePredictor, BaseModel, Input, File, Path
-from faster_whisper import WhisperModel, BatchedInferencePipeline
-from pyannote.audio import Pipeline
 import torchaudio
+from pyannote.audio import Pipeline
+from faster_whisper import WhisperModel, BatchedInferencePipeline
+from cog import BasePredictor, BaseModel, Input, File, Path
 
 
 class Output(BaseModel):
@@ -191,6 +192,32 @@ class Predictor(BasePredictor):
     def convert_time(self, secs, offset_seconds=0):
         return datetime.timedelta(seconds=(round(secs) + offset_seconds))
 
+    def simple_sent_tokenize(self, text):
+        """
+        A simple, language-agnostic sentence tokenizer.
+        Splits on '.', '!', '?', and handles common abbreviations.
+        """
+        # Split on sentence-ending punctuation, but keep the punctuation
+        sentences = re.split(r'([.!?])\s+', text)
+
+        # Recombine sentence-ending punctuation with sentences
+        sentences = [''.join(group) for group in zip(sentences[::2], sentences[1::2] + [''])]
+
+        # Handle common abbreviations (Mr., Mrs., Dr., etc.)
+        final_sentences = []
+        current_sentence = ''
+        for sentence in sentences:
+            if re.search(r'\b[A-Z][a-z]?\.', sentence):
+                current_sentence += sentence + ' '
+            else:
+                final_sentences.append(current_sentence + sentence)
+                current_sentence = ''
+
+        if current_sentence:
+            final_sentences.append(current_sentence)
+
+        return final_sentences
+
     def speech_to_text(
         self,
         audio_file_wav,
@@ -257,63 +284,111 @@ class Predictor(BasePredictor):
 
         # Initialize variables to keep track of the current position in both lists
         margin = 0.1  # 0.1 seconds margin
-
-        # Initialize an empty list to hold the final segments with speaker info
+        min_speaker_duration_factor = 1.3  # Factor to multiply average word duration
         final_segments = []
 
         diarization_list = list(diarization.itertracks(yield_label=True))
-        unique_speakers = {
-            speaker for _, _, speaker in diarization.itertracks(yield_label=True)
-        }
+        unique_speakers = {speaker for _, _, speaker in diarization_list}
         detected_num_speakers = len(unique_speakers)
 
         speaker_idx = 0
         n_speakers = len(diarization_list)
 
-        # Iterate over each segment
         for segment in segments:
-            segment_start = segment["start"] + offset_seconds
-            segment_end = segment["end"] + offset_seconds
+            segment_start = round(segment["start"] + offset_seconds, 2)
+            segment_end = round(segment["end"] + offset_seconds, 2)
             segment_text = []
             segment_words = []
+            current_speaker = None
+            speaker_changes = []
 
-            # Iterate over each word in the segment
+            # Calculate average word duration for this segment
+            word_durations = [word["end"] - word["start"] for word in segment["words"]]
+            avg_word_duration = sum(word_durations) / len(word_durations) if word_durations else 0
+            min_speaker_duration = avg_word_duration * min_speaker_duration_factor
+
             for word in segment["words"]:
-                word_start = word["start"] + offset_seconds - margin
-                word_end = word["end"] + offset_seconds + margin
+                word_start = round(word["start"] + offset_seconds - margin, 2)
+                word_end = round(word["end"] + offset_seconds + margin, 2)
 
                 while speaker_idx < n_speakers:
                     turn, _, speaker = diarization_list[speaker_idx]
+                    turn_start = round(turn.start, 2)
+                    turn_end = round(turn.end, 2)
 
-                    if turn.start <= word_end and turn.end >= word_start:
-                        # Add word without modifications
+                    if turn_start <= word_end and turn_end >= word_start:
+                        if current_speaker != speaker:
+                            if not speaker_changes or (word_start - speaker_changes[-1][0]) >= min_speaker_duration:
+                                current_speaker = speaker
+                                speaker_changes.append((round(word_start - offset_seconds, 2), speaker))
+
                         segment_text.append(word["word"])
-
-                        # Strip here for individual word storage
                         word["word"] = word["word"].strip()
                         segment_words.append(word)
 
-                        if turn.end <= word_end:
+                        if turn_end <= word_end:
                             speaker_idx += 1
-
                         break
-                    elif turn.end < word_start:
+                    elif turn_end < word_start:
                         speaker_idx += 1
                     else:
                         break
 
             if segment_text:
-                combined_text = "".join(segment_text)
-                cleaned_text = re.sub("  ", " ", combined_text).strip()
-                new_segment = {
-                    "avg_logprob": segment["avg_logprob"],
-                    "start": segment_start - offset_seconds,
-                    "end": segment_end - offset_seconds,
-                    "speaker": speaker,
-                    "text": cleaned_text,
-                    "words": segment_words,
-                }
-                final_segments.append(new_segment)
+                combined_text = " ".join(segment_text)
+                cleaned_text = re.sub(r'\s+', ' ', combined_text).strip()
+
+                # Use our simple sentence tokenization
+                sentences = self.simple_sent_tokenize(cleaned_text)
+                sentence_boundaries = [0]
+                current_length = 0
+                for sentence in sentences:
+                    current_length += len(sentence)
+                    sentence_boundaries.append(current_length)
+
+                # Merge speaker changes that occur mid-sentence
+                merged_speaker_changes = []
+                for i, (start, speaker) in enumerate(speaker_changes):
+                    if i == 0 or (
+                            merged_speaker_changes and start - merged_speaker_changes[-1][0] >= min_speaker_duration
+                    ):
+                        # Check if this change is near a sentence boundary
+                        word_index = next((i for i, w in enumerate(segment_words) if w["start"] >= start),
+                                          len(segment_words) - 1)
+                        char_index = sum(len(w["word"]) + 1 for w in segment_words[:word_index])
+                        if any(abs(char_index - boundary) < 10 for boundary in sentence_boundaries):
+                            merged_speaker_changes.append((start, speaker))
+
+                # Split the segment if there are significant speaker changes
+                if len(merged_speaker_changes) > 1:
+                    for i in range(len(merged_speaker_changes)):
+                        start = merged_speaker_changes[i][0]
+                        end = merged_speaker_changes[i + 1][0] if i + 1 < len(merged_speaker_changes) else round(
+                            segment_end - offset_seconds, 2)
+                        speaker = merged_speaker_changes[i][1]
+
+                        sub_segment_words = [w for w in segment_words if start <= w["start"] < end]
+                        sub_segment_text = " ".join([w["word"] for w in sub_segment_words])
+
+                        new_segment = {
+                            "avg_logprob": segment["avg_logprob"],
+                            "start": start,
+                            "end": end,
+                            "speaker": speaker,
+                            "text": sub_segment_text,
+                            "words": sub_segment_words,
+                        }
+                        final_segments.append(new_segment)
+                else:
+                    new_segment = {
+                        "avg_logprob": segment["avg_logprob"],
+                        "start": round(segment_start - offset_seconds, 2),
+                        "end": round(segment_end - offset_seconds, 2),
+                        "speaker": merged_speaker_changes[0][1] if merged_speaker_changes else None,
+                        "text": cleaned_text,
+                        "words": segment_words,
+                    }
+                    final_segments.append(new_segment)
 
         time_merging_end = time.time()
         print(

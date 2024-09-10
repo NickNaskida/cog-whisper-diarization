@@ -209,8 +209,6 @@ class Predictor(BasePredictor):
         # Transcribe audio
         print("Starting transcribing")
         options = dict(
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=1000),
             initial_prompt=prompt,
             word_timestamps=word_timestamps,
             language=language,

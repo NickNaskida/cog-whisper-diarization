@@ -31,10 +31,6 @@ class Predictor(BasePredictor):
             compute_type="float16",
         )
         self.model = BatchedInferencePipeline(model=model)
-        self.diarization_model = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token="YOUR HF TOKEN",
-        ).to(torch.device("cuda"))
 
     def predict(
         self,
@@ -45,6 +41,10 @@ class Predictor(BasePredictor):
             description="Or provide: A direct audio file URL", default=None
         ),
         file: Path = Input(description="Or an audio file", default=None),
+        hf_token: str = Input(
+            default=None,
+            description="Provide a hf.co/settings/token for Pyannote.audio to diarise the audio clips. You need to agree to the terms in 'https://huggingface.co/pyannote/speaker-diarization-3.1' and 'https://huggingface.co/pyannote/segmentation-3.0' first.",
+        ),
         group_segments: bool = Input(
             description="Group segments of same speaker shorter apart than 2 seconds",
             default=True,
@@ -55,10 +55,7 @@ class Predictor(BasePredictor):
             choices=["words_only", "segments_only", "both"],
         ),
         num_speakers: int = Input(
-            description="Number of speakers, leave empty to autodetect.",
-            ge=1,
-            le=50,
-            default=None,
+            description="Number of speakers, leave empty to autodetect.", ge=1, le=50, default=2,
         ),
         translate: bool = Input(
             description="Translate the speech into English.",
@@ -106,7 +103,6 @@ class Predictor(BasePredictor):
                         temp_wav_filename,
                     ]
                 )
-
             elif file_url is not None:
                 response = requests.get(file_url)
                 temp_audio_filename = f"temp-{time.time_ns()}.audio"
@@ -156,6 +152,14 @@ class Predictor(BasePredictor):
                 if os.path.exists(temp_audio_filename):
                     os.remove(temp_audio_filename)
 
+            try:
+                self.diarization_model = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=hf_token,
+                ).to(torch.device("cuda"))
+            except Exception as e:
+                print(f"https://huggingface.co/pyannote/speaker-diarization-3.1 cannot be loaded, please check the hf_token provided.: {e}")
+
             segments, detected_num_speakers, detected_language = self.speech_to_text(
                 temp_wav_filename,
                 num_speakers,
@@ -179,7 +183,6 @@ class Predictor(BasePredictor):
 
         except Exception as e:
             raise RuntimeError("Error Running inference with local model", e)
-
         finally:
             # Clean up
             if os.path.exists(temp_wav_filename):
@@ -242,6 +245,7 @@ class Predictor(BasePredictor):
         )
 
         print("Starting diarization")
+
         waveform, sample_rate = torchaudio.load(audio_file_wav)
         diarization = self.diarization_model(
             {"waveform": waveform, "sample_rate": sample_rate},
@@ -249,9 +253,7 @@ class Predictor(BasePredictor):
         )
 
         time_diraization_end = time.time()
-        print(
-            f"Finished with diarization, took {time_diraization_end - time_transcribing_end:.5} seconds"
-        )
+        print(f"Finished with diarization, took {time_diraization_end - time_transcribing_end:.5} seconds")
 
         print("Starting merging")
 

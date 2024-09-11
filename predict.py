@@ -196,10 +196,10 @@ class Predictor(BasePredictor):
     def simple_sent_tokenize(self, text):
         """
         A simple, language-agnostic sentence tokenizer.
-        Splits on '.', '!', '?', and handles common abbreviations.
+        Splits on '.', '!', '?', ':', ';' and handles common abbreviations.
         """
         # Split on sentence-ending punctuation, but keep the punctuation
-        sentences = re.split(r'([.!?])\s+', text)
+        sentences = re.split(r'([.!?:;])\s+', text)
 
         # Recombine sentence-ending punctuation with sentences
         sentences = [''.join(group) for group in zip(sentences[::2], sentences[1::2] + [''])]
@@ -285,7 +285,7 @@ class Predictor(BasePredictor):
 
         # Initialize variables to keep track of the current position in both lists
         margin = 0.1  # 0.1 seconds margin
-        min_speaker_duration_factor = 1.3  # Factor to multiply average word duration
+        min_speaker_duration_factor = 1.5  # Factor to multiply average word duration
         final_segments = []
 
         diarization_list = list(diarization.itertracks(yield_label=True))

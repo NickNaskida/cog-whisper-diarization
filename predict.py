@@ -285,7 +285,7 @@ class Predictor(BasePredictor):
 
         # Initialize variables to keep track of the current position in both lists
         margin = 0.1  # 0.1 seconds margin
-        min_speaker_duration_factor = 1.5  # Factor to multiply average word duration
+        min_speaker_duration = 0.5  # Minimum speaker duration in seconds
         final_segments = []
 
         diarization_list = list(diarization.itertracks(yield_label=True))
@@ -303,21 +303,18 @@ class Predictor(BasePredictor):
             current_speaker = None
             speaker_changes = []
 
-            # Calculate average word duration for this segment
-            word_durations = [word["end"] - word["start"] for word in segment["words"]]
-            avg_word_duration = sum(word_durations) / len(word_durations) if word_durations else 0
-            min_speaker_duration = avg_word_duration * min_speaker_duration_factor
-
             for word in segment["words"]:
                 word_start = round(word["start"] + offset_seconds - margin, 2)
                 word_end = round(word["end"] + offset_seconds + margin, 2)
+                word_assigned = False
 
-                while speaker_idx < n_speakers:
+                while speaker_idx < n_speakers and not word_assigned:
                     turn, _, speaker = diarization_list[speaker_idx]
                     turn_start = round(turn.start, 2)
                     turn_end = round(turn.end, 2)
 
-                    if turn_start <= word_end and turn_end >= word_start:
+                    if (turn_start <= word_start < turn_end) or (turn_start < word_end <= turn_end) or (
+                            word_start <= turn_start and word_end >= turn_end):
                         if current_speaker != speaker:
                             if not speaker_changes or (word_start - speaker_changes[-1][0]) >= min_speaker_duration:
                                 current_speaker = speaker
@@ -326,11 +323,9 @@ class Predictor(BasePredictor):
                         segment_text.append(word["word"])
                         word["word"] = word["word"].strip()
                         segment_words.append(word)
+                        word_assigned = True
 
-                        if turn_end <= word_end:
-                            speaker_idx += 1
-                        break
-                    elif turn_end < word_start:
+                    if turn_end <= word_end:
                         speaker_idx += 1
                     else:
                         break
@@ -350,7 +345,8 @@ class Predictor(BasePredictor):
                 # Merge speaker changes that occur mid-sentence
                 merged_speaker_changes = []
                 for i, (start, speaker) in enumerate(speaker_changes):
-                    if i == 0 or (merged_speaker_changes and start - merged_speaker_changes[-1][0] >= min_speaker_duration):
+                    if i == 0 or (
+                            merged_speaker_changes and start - merged_speaker_changes[-1][0] >= min_speaker_duration):
                         # Check if this change is near a sentence boundary
                         word_index = next(
                             (i for i, w in enumerate(segment_words) if w["start"] >= start - offset_seconds),

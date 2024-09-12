@@ -1,8 +1,8 @@
 # Cog Whisper Diarization
 
-⚡️ Insanely fast audio transcribing + diarization pipeline. Fork that implements Batched Processing, which speeds up the whole pipeline by 3-4 times.
+⚡️ Insanely fast audio transcribing + diarization pipeline. Transcribes and diarizes 2-hour-long audio in **3 minutes** (batch_size=64)
 
-Transcribes and diarizes 2-hour-long audio in 3 minutes (batch_size=64)
+Fork that implements Batched Processing, which speeds up the whole pipeline by 3-4 times.
 
 
 ## AI/ML Models used
